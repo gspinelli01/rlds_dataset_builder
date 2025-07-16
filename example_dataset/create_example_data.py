@@ -8,6 +8,8 @@ N_VAL_EPISODES = 100
 EPISODE_LENGTH = 10
 
 
+# lista di dizionari dict_keys(['image', 'wrist_image', 'state', 'action', 'language_instruction'])
+
 def create_fake_episode(path):
     episode = []
     for step in range(EPISODE_LENGTH):

@@ -18,6 +18,11 @@ class ExampleDataset(tfds.core.GeneratorBasedBuilder):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._embed = hub.load("https://tfhub.dev/google/universal-sentence-encoder-large/5")
+        
+        import debugpy
+        debugpy.listen(5678)
+        print('waiting for client to attach')
+        debugpy.wait_for_client()  # blocks execution until client is attached
 
     def _info(self) -> tfds.core.DatasetInfo:
         """Dataset metadata (homepage, citation,...)."""
