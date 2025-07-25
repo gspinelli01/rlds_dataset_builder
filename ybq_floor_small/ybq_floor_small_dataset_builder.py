@@ -8,8 +8,16 @@ import tensorflow_hub as hub
 import os
 import h5py
 
-class RobosuiteLiftRedBlock(tfds.core.GeneratorBasedBuilder):
-    """DatasetBuilder for robosuite lift red block dataset."""
+
+# ====> DEBUG
+# import debugpy
+# debugpy.listen(5678)
+# print('waiting for client to attach')
+# debugpy.wait_for_client()  # blocks execution until client is attached
+
+
+class YbqFloorSmall(tfds.core.GeneratorBasedBuilder):
+    """DatasetBuilder for ybq floor small."""
 
     VERSION = tfds.core.Version('1.0.0')
     RELEASE_NOTES = {
@@ -18,13 +26,7 @@ class RobosuiteLiftRedBlock(tfds.core.GeneratorBasedBuilder):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self._embed = hub.load("https://tfhub.dev/google/universal-sentence-encoder-large/5")
-        
-        # import debugpy
-        # debugpy.listen(5678)
-        # print('waiting for client to attach')
-        # debugpy.wait_for_client()  # blocks execution until client is attached
-
+        self._embed = hub.load("https://tfhub.dev/google/universal-sentence-encoder-large/5")        
 
     def _info(self) -> tfds.core.DatasetInfo:
         """Dataset metadata (homepage, citation,...)."""
@@ -35,27 +37,30 @@ class RobosuiteLiftRedBlock(tfds.core.GeneratorBasedBuilder):
                         'image': tfds.features.Image(
                             shape=(256, 256, 3),
                             dtype=np.uint8,
-                            encoding_format='png',
+                            encoding_format='jpeg',
                             doc='Main camera RGB observation.',
                         ),
-                        'state': tfds.features.Tensor(
-                            shape=(32,),
-                            dtype=np.float64,
-                            doc='Robot state, consists of [7x robot joint angles, '
-                                '2x gripper position, 1x door opening angle].',
+                        'wrist_image': tfds.features.Image(
+                            shape=(256, 256, 3),
+                            dtype=np.uint8,
+                            encoding_format='jpeg',
+                            doc='Wrist camera RGB observation.',
                         ),
-                        'eef_pos': tfds.features.Tensor(
+                        'state': tfds.features.Tensor(
                             shape=(8,),
-                            dtype=np.float64,
-                            doc='Eef (gripper) position, consists of [3x gripper position, '
-                                '4x gripper rotation in quaternion, 1x open/closed].',
+                            dtype=np.float32,
+                            doc='Robot EEF state (6D pose, 2D gripper).',
+                        ),
+                        'joint_state': tfds.features.Tensor(
+                            shape=(7,),
+                            dtype=np.float32,
+                            doc='Robot joint angles.',
                         )
                     }),
                     'action': tfds.features.Tensor(
                         shape=(7,),
-                        dtype=np.float64,
-                        doc='Robot action, consists of [7x joint velocities, '
-                            '2x gripper velocities, 1x terminate episode].',
+                        dtype=np.float32,
+                        doc='Robot EEF action.',
                     ),
                     'discount': tfds.features.Scalar(
                         dtype=np.float32,
@@ -80,12 +85,6 @@ class RobosuiteLiftRedBlock(tfds.core.GeneratorBasedBuilder):
                     'language_instruction': tfds.features.Text(
                         doc='Language Instruction.'
                     ),
-                    'language_embedding': tfds.features.Tensor(
-                        shape=(512,),
-                        dtype=np.float32,
-                        doc='Kona language embedding. '
-                            'See https://tfhub.dev/google/universal-sentence-encoder-large/5'
-                    ),
                 }),
                 'episode_metadata': tfds.features.FeaturesDict({
                     'file_path': tfds.features.Text(
@@ -98,51 +97,60 @@ class RobosuiteLiftRedBlock(tfds.core.GeneratorBasedBuilder):
         """Define data splits."""
         return {
             'train': self._generate_examples(path='data/train/*.hdf5'),
-            'val': self._generate_examples(path='data/val/*.hdf5'),
         }
 
     def _generate_examples(self, path) -> Iterator[Tuple[str, Any]]:
         """Generator of examples for each split."""
 
         def _parse_example(episode_path, demo_id):
-            # load raw data --> this should change for your dataset
+            # load raw data
             with h5py.File(episode_path, "r") as F:
                 if f"demo_{demo_id}" not in F['data'].keys():
                     return None # skip episode if the demo doesn't exist (e.g. due to failed demo)
-                delta_actions = F['data'][f"demo_{demo_id}"]["actions"][()]
-                eef_pos = F['data'][f'demo_{demo_id}']['eef_pos'][()]
-                image_obs = F['data'][f'demo_{demo_id}']['image_obs'][()]
-                states = F['data'][f'demo_{demo_id}']['states'][()]
-    
+                actions = F['data'][f"demo_{demo_id}"]["actions"][()]
+                states = F['data'][f"demo_{demo_id}"]["obs"]["ee_states"][()]
+                gripper_states = F['data'][f"demo_{demo_id}"]["obs"]["gripper_states"][()]
+                joint_states = F['data'][f"demo_{demo_id}"]["obs"]["joint_states"][()]
+                images = F['data'][f"demo_{demo_id}"]["obs"]["agentview_rgb"][()]
+                wrist_images = F['data'][f"demo_{demo_id}"]["obs"]["eye_in_hand_rgb"][()]
+
+            # compute language instruction
+            raw_file_string = os.path.basename(episode_path).split('/')[-1]
+            words = raw_file_string[:-10].split("_")
+            command = ''
+            for w in words:
+                if "SCENE" in w:
+                    command = ''
+                    continue
+                command = command + w + ' '
+            command = command[:-1]
 
             # assemble episode --> here we're assuming demos so we set reward to 1 at the end
             episode = []
-
-            # total_lenght = 
-            ep_lenght = delta_actions.shape[0]
-
-            for i in range(ep_lenght):
-                # compute Kona language embedding
-
-                #TODO: language instruction direttamente nel file .npz
-                language_instruction = 'lift the red block'
-                language_embedding = self._embed([language_instruction])[0].numpy()
+            for i in range(actions.shape[0]):
+                # # => DEBUG front image: 
+                # from PIL import Image
+                # im = Image.fromarray(images[i][::-1,::,::])
+                # im.save('test_obs.png')
+                # # => DEBUG wrist image:
+                # from PIL import Image
+                # im = Image.fromarray(wrist_images[i][::-1,::,::])
+                # im.save('test_wrist.png')
 
                 episode.append({
                     'observation': {
-                        'image': image_obs[i][::-1,::,::-1],
-                        # 'wrist_image': step['wrist_image'],
-                        'state': states[i],
-                        'eef_pos': eef_pos[i]
+                        'image': images[i][::-1,::,::],
+                        'wrist_image': wrist_images[i][::-1,::,::],
+                        'state': np.asarray(np.concatenate((states[i], gripper_states[i]), axis=-1), np.float32),
+                        'joint_state': np.asarray(joint_states[i], dtype=np.float32),
                     },
-                    'action': delta_actions[i],
+                    'action': np.asarray(actions[i], dtype=np.float32),
                     'discount': 1.0,
-                    'reward': float(i == (ep_lenght - 1)),
+                    'reward': float(i == (actions.shape[0] - 1)),
                     'is_first': i == 0,
-                    'is_last': i == (ep_lenght - 1),
-                    'is_terminal': i == (ep_lenght - 1),
-                    'language_instruction': language_instruction,
-                    'language_embedding': language_embedding,
+                    'is_last': i == (actions.shape[0] - 1),
+                    'is_terminal': i == (actions.shape[0] - 1),
+                    'language_instruction': command,
                 })
 
             # create output data sample
@@ -154,7 +162,7 @@ class RobosuiteLiftRedBlock(tfds.core.GeneratorBasedBuilder):
             }
 
             # if you want to skip an example for whatever reason, simply return None
-            return episode_path + f'_{demo_id}', sample
+            return episode_path + f"_{demo_id}", sample
 
         # create list of all examples
         episode_paths = glob.glob(path)

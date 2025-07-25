@@ -6,7 +6,7 @@ import tensorflow as tf
 import tensorflow_datasets as tfds
 import tensorflow_hub as hub
 import os
-import h5py
+
 
 class RobosuiteLiftRedBlock(tfds.core.GeneratorBasedBuilder):
     """DatasetBuilder for robosuite lift red block dataset."""
@@ -20,10 +20,10 @@ class RobosuiteLiftRedBlock(tfds.core.GeneratorBasedBuilder):
         super().__init__(*args, **kwargs)
         self._embed = hub.load("https://tfhub.dev/google/universal-sentence-encoder-large/5")
         
-        # import debugpy
-        # debugpy.listen(5678)
-        # print('waiting for client to attach')
-        # debugpy.wait_for_client()  # blocks execution until client is attached
+        import debugpy
+        debugpy.listen(5678)
+        print('waiting for client to attach')
+        debugpy.wait_for_client()  # blocks execution until client is attached
 
 
     def _info(self) -> tfds.core.DatasetInfo:
@@ -33,27 +33,27 @@ class RobosuiteLiftRedBlock(tfds.core.GeneratorBasedBuilder):
                 'steps': tfds.features.Dataset({
                     'observation': tfds.features.FeaturesDict({
                         'image': tfds.features.Image(
-                            shape=(256, 256, 3),
+                            shape=(64, 64, 3),
                             dtype=np.uint8,
                             encoding_format='png',
                             doc='Main camera RGB observation.',
                         ),
+                        'wrist_image': tfds.features.Image(
+                            shape=(64, 64, 3),
+                            dtype=np.uint8,
+                            encoding_format='png',
+                            doc='Wrist camera RGB observation.',
+                        ),
                         'state': tfds.features.Tensor(
-                            shape=(32,),
-                            dtype=np.float64,
+                            shape=(10,),
+                            dtype=np.float32,
                             doc='Robot state, consists of [7x robot joint angles, '
                                 '2x gripper position, 1x door opening angle].',
-                        ),
-                        'eef_pos': tfds.features.Tensor(
-                            shape=(8,),
-                            dtype=np.float64,
-                            doc='Eef (gripper) position, consists of [3x gripper position, '
-                                '4x gripper rotation in quaternion, 1x open/closed].',
                         )
                     }),
                     'action': tfds.features.Tensor(
-                        shape=(7,),
-                        dtype=np.float64,
+                        shape=(10,),
+                        dtype=np.float32,
                         doc='Robot action, consists of [7x joint velocities, '
                             '2x gripper velocities, 1x terminate episode].',
                     ),
@@ -97,53 +97,51 @@ class RobosuiteLiftRedBlock(tfds.core.GeneratorBasedBuilder):
     def _split_generators(self, dl_manager: tfds.download.DownloadManager):
         """Define data splits."""
         return {
-            'train': self._generate_examples(path='data/train/*.hdf5'),
-            'val': self._generate_examples(path='data/val/*.hdf5'),
+            'train': self._generate_examples(path='data/train/ep_*'),
+            'val': self._generate_examples(path='data/val/ep_*'),
         }
 
     def _generate_examples(self, path) -> Iterator[Tuple[str, Any]]:
         """Generator of examples for each split."""
 
-        def _parse_example(episode_path, demo_id):
+        def _parse_example(episode_path):
             # load raw data --> this should change for your dataset
-            with h5py.File(episode_path, "r") as F:
-                if f"demo_{demo_id}" not in F['data'].keys():
-                    return None # skip episode if the demo doesn't exist (e.g. due to failed demo)
-                delta_actions = F['data'][f"demo_{demo_id}"]["actions"][()]
-                eef_pos = F['data'][f'demo_{demo_id}']['eef_pos'][()]
-                image_obs = F['data'][f'demo_{demo_id}']['image_obs'][()]
-                states = F['data'][f'demo_{demo_id}']['states'][()]
-    
+
+            episode_frags = sorted(glob.glob(os.path.join(episode_path,'state_*_*.npz')))
 
             # assemble episode --> here we're assuming demos so we set reward to 1 at the end
             episode = []
 
-            # total_lenght = 
-            ep_lenght = delta_actions.shape[0]
+            total_lenght = 
 
-            for i in range(ep_lenght):
-                # compute Kona language embedding
 
-                #TODO: language instruction direttamente nel file .npz
-                language_instruction = 'lift the red block'
-                language_embedding = self._embed([language_instruction])[0].numpy()
+            for frag, episode_frag in enumerate(episode_frags):
 
-                episode.append({
-                    'observation': {
-                        'image': image_obs[i][::-1,::,::-1],
-                        # 'wrist_image': step['wrist_image'],
-                        'state': states[i],
-                        'eef_pos': eef_pos[i]
-                    },
-                    'action': delta_actions[i],
-                    'discount': 1.0,
-                    'reward': float(i == (ep_lenght - 1)),
-                    'is_first': i == 0,
-                    'is_last': i == (ep_lenght - 1),
-                    'is_terminal': i == (ep_lenght - 1),
-                    'language_instruction': language_instruction,
-                    'language_embedding': language_embedding,
-                })
+                frag_data = np.load(episode_frag, allow_pickle=True)     # this is a list of dicts in our case
+
+                for i, step in enumerate(frag_data.items()):
+                    # compute Kona language embedding
+
+                    #TODO: language instruction direttamente nel file .npz
+                    language_instruction = 'lift the red block'
+                    language_embedding = self._embed([language_instruction])[0].numpy()
+
+                    last = (frag+1)*i == (len(episode_frags))*(len(frag_data['states']) - 1)
+                    episode.append({
+                        'observation': {
+                            'image': frag_data['image_obs'][i],
+                            # 'wrist_image': step['wrist_image'],
+                            'state': np.concatenate([frag_data['gripper_state'][i], np.array([frag_data['action_infos'][i]['actions'][-1]])])
+                        },
+                        'action': np.concatenate([frag_data['gripper_state'][i+1], np.array([frag_data['action_infos'][i+1]['actions'][-1]])]),
+                        'discount': 1.0,
+                        'reward': float(i == (len(frag_data) - 1)),
+                        'is_first': i == 0,
+                        'is_last': i == (len(frag_data) - 1),
+                        'is_terminal': i == (len(frag_data) - 1),
+                        'language_instruction': language_instruction,
+                        'language_embedding': language_embedding,
+                    })
 
             # create output data sample
             sample = {
@@ -154,24 +152,14 @@ class RobosuiteLiftRedBlock(tfds.core.GeneratorBasedBuilder):
             }
 
             # if you want to skip an example for whatever reason, simply return None
-            return episode_path + f'_{demo_id}', sample
+            return episode_path, sample
 
         # create list of all examples
         episode_paths = glob.glob(path)
 
         # for smallish datasets, use single-thread parsing
-
         for sample in episode_paths:
-            with h5py.File(sample, "r") as F:
-                n_demos = len(F['data'])
-            idx = 1
-            cnt = 1
-            while cnt < (n_demos+1):
-                ret = _parse_example(sample, idx)
-                if ret is not None:
-                    cnt += 1
-                idx += 1
-                yield ret
+            yield _parse_example(sample)
 
         # for large datasets use beam to parallelize data parsing (this will have initialization overhead)
         # beam = tfds.core.lazy_imports.apache_beam
